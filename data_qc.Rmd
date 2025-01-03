@@ -1,0 +1,593 @@
+---
+title: "qc_control"
+author: "Léonardo Panunzi"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    code_folding: hide
+---
+
+```{r setup, echo=TRUE, cache=FALSE}
+suppressWarnings(suppressMessages({
+library(knitr)
+library(rmdformats)
+library(ComplexHeatmap)
+library(gridExtra)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(readr)
+library(dplyr)
+library(openxlsx)
+library(stringr)
+library(viridis)
+library(MASS)
+library(nabor)
+library(bigutilsr)
+library(DESeq2)
+library(biomaRt)
+library(eulerr)
+library(UpSetR)
+}))
+## Global options
+options(max.print="1000")
+opts_chunk$set(echo=TRUE,
+	             cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+
+```
+
+# Data loading
+
+This analysis is based on several metrics from Picard output results (CollectRnaSeqMetrics).
+
+
+```{r data_loading}
+bam_met <- read.table("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/bam_qc.tsv",header=TRUE, row.names = 1,sep="\t")
+bam_met$EXONIC_READS_QUALIMAP <- gsub(".* /", "", bam_met$EXONIC_READS_QUALIMAP)
+bam_met$INTRONIC_READS_QUALIMAP <- gsub(".* /", "", bam_met$INTRONIC_READS_QUALIMAP)
+bam_met$INTERGENIC_READS_QUALIMAP <- gsub(".* /", "", bam_met$INTERGENIC_READS_QUALIMAP)
+bam_met$NUMBER_OF_MAPPED_READS_QUALIMAP <- gsub(".* /", "", bam_met$NUMBER_OF_MAPPED_READS_QUALIMAP)
+bam_met <- bam_met %>% mutate(across(everything(), as.numeric))
+bam_mets <- scale(bam_met)
+bam_mets <- bam_mets[,colSums(is.na(bam_mets))<nrow(bam_mets)]
+
+```
+# Scaled and clustered QC metrics:
+### Pearson algorithm
+
+```{r met_clustering, fig.width=11, fig.height=8}
+
+p1 <- Heatmap(t(bam_mets), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p1)
+
+```
+
+
+# Data gathering according to QC metric
+
+```{r dgqc, fig.width=11, fig.height=8}
+
+pct_nub <- data.frame('val' = bam_met$PCT_USABLE_BASES)
+rownames(pct_nub) <- rownames(bam_met)
+pct_nub <- na.omit(pct_nub)
+pct_nub_outliers <- boxplot(pct_nub$val, plot = FALSE)$out
+pct_nub_out <- subset(pct_nub, pct_nub$val %in% pct_nub_outliers)
+pct_nub_omin <- max(min(pct_nub$val), as.numeric(quantile(pct_nub$val, 0.25)) - (IQR(pct_nub$val)*1.5))
+pct_nub_omax <- min(max(pct_nub$val), as.numeric(quantile(pct_nub$val, 0.75)) + (IQR(pct_nub$val)*1.5))
+pct_nub <- pct_nub %>% mutate(status_ubs = ifelse(val >= pct_nub_omax, "outmax", ifelse(val <= pct_nub_omin, "outmin", "pass")))
+
+pct_igb <- data.frame('val' = bam_met$INTERGENIC_BASES)
+rownames(pct_igb) <- rownames(bam_met)
+pct_igb <- na.omit(pct_igb)
+pct_igb_outliers <- boxplot(pct_igb$val, plot = FALSE)$out
+pct_igb_out <- subset(pct_igb, pct_igb$val %in% pct_igb_outliers)
+pct_igb_omin <- max(min(pct_igb$val), as.numeric(quantile(pct_igb$val, 0.25)) - (IQR(pct_igb$val)*1.5))
+pct_igb_omax <- min(max(pct_igb$val), as.numeric(quantile(pct_igb$val, 0.75)) + (IQR(pct_igb$val)*1.5))
+pct_igb <- pct_igb %>% mutate(status_igb = ifelse(val >= pct_igb_omax, "outmax", ifelse(val <= pct_igb_omin, "outmin", "pass")))
+
+pct_umr <- data.frame('val' = bam_met$UNIQUELY_MAPPED_READS_PCT_STAR)
+rownames(pct_umr) <- rownames(bam_met)
+pct_umr <- na.omit(pct_umr)
+pct_umr_outliers <- boxplot(pct_umr$val, plot = FALSE)$out
+pct_umr_out <- subset(pct_umr, pct_umr$val %in% pct_umr_outliers)
+pct_umr_omin <- max(min(pct_umr$val), as.numeric(quantile(pct_umr$val, 0.25)) - (IQR(pct_umr$val)*1.5))
+pct_umr_omax <- min(max(pct_umr$val), as.numeric(quantile(pct_umr$val, 0.75)) + (IQR(pct_umr$val)*1.5))
+pct_umr <- pct_umr %>% mutate(status_umr = ifelse(val >= pct_umr_omax, "outmax", ifelse(val <= pct_umr_omin, "outmin", "pass")))
+
+pct_fld <- data.frame('val' = bam_met$FAILED)
+rownames(pct_fld) <- rownames(bam_met)
+pct_fld <- na.omit(pct_fld)
+pct_fld_outliers <- boxplot(pct_fld$val, plot = FALSE)$out
+pct_fld_out <- subset(pct_fld, pct_fld$val %in% pct_fld_outliers)
+pct_fld_omin <- max(min(pct_fld$val), as.numeric(quantile(pct_fld$val, 0.25)) - (IQR(pct_fld$val)*1.5))
+pct_fld_omax <- min(max(pct_fld$val), as.numeric(quantile(pct_fld$val, 0.75)) + (IQR(pct_fld$val)*1.5))
+pct_fld <- pct_fld %>% mutate(status_fld = ifelse(val >= pct_fld_omax, "outmax", ifelse(val <= pct_fld_omin, "outmin", "pass")))
+
+
+load("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/tximport.Rdata")
+samples <- read.table("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/sample_ids.tsv" ,header=TRUE, sep="\t")
+samples_id <- read.table("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/sample_ids_corresp.tsv" ,header=TRUE, sep="\t")
+ddsTxi <- DESeqDataSetFromTximport(salmon_txi, colData = samples, design = ~1)
+dds <- estimateSizeFactors(ddsTxi)
+deseq_obj <- dds
+normCounts <- log2(counts(deseq_obj, normalized=TRUE)+1)
+KEEP.genes <- rowSums(edgeR::cpm(counts(deseq_obj)) >= 0.2) >= 10
+normCountsAll <- normCounts
+normCounts <- normCounts[KEEP.genes, samples$sample_id]
+salmonCountsAll <- counts(dds, normalize=FALSE)
+
+gtf <- read.delim(file=file("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/gencode.v43.chr_patch_hapl_scaff.annotation.gtf"),
+                    header=FALSE,
+                    stringsAsFactors = FALSE,
+                    comment.char = "#",
+                    sep="\t")
+
+gtf <- gtf[gtf$V3=="gene", ]
+
+mySplit <- function(x, split="_", item=NULL, fixed=FALSE, perl=FALSE) {
+  if(is.null(item)){
+    sapply(x, function(y) unlist(strsplit(y, split=split, fixed=fixed, perl=perl)))
+  } else{
+    sapply(x, function(y) unlist(strsplit(y, split=split, fixed=fixed, perl=perl))[item])
+  }
+}
+
+parseGTF <- function(gtf_row) {
+    tmp <- mySplit(gsub("^ ","",mySplit(gtf_row[9], split=";")), split=" ")
+    res <- tmp[2, ]
+    names(res) <- tmp[1,]
+    col_names <- c("gene_id", "gene_type", "gene_status", "gene_name", "level", "havana_gene") 
+    # we try to get the value for the above columns (there are not present for all entries)
+    res <- res[match(col_names, names(res))]
+    names(res) <- col_names
+    c(chr=gtf_row[[1]], start=gtf_row[[4]], end=gtf_row[[5]], strand=gtf_row[[7]], res, source=gtf_row[[2]])
+}
+
+gtf <- as.matrix(gtf)
+annoGeneAll <- t(apply(gtf, 1, parseGTF))
+annoGeneAll <- as.data.frame(annoGeneAll, stringsAsFactors=FALSE)
+annoGeneAll$start <- as.numeric(annoGeneAll$start)
+annoGeneAll$end <- as.numeric(annoGeneAll$end)
+ensembl <- useEnsembl(biomart = "ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", version = 109)
+biomartAnno <- getBM(attributes= c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id", "gene_biotype", "description", "chromosome_name", "start_position", "end_position", "band", "strand"),
+        filters=c("ensembl_gene_id"),
+        values=list(gsub("\\..*","",annoGeneAll$gene_id)), mart=ensembl)
+biomartAnno <- biomartAnno[order(biomartAnno$ensembl_gene_id, biomartAnno$entrezgene_id),]
+annoGeneAll <- cbind(annoGeneAll, biomartAnno[match(gsub("\\..*","", annoGeneAll$gene_id), biomartAnno$ensembl_gene_id), c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id",  "description","band", "gene_biotype")])
+rownames(annoGeneAll) <- annoGeneAll$gene_id
+prot_cod_genes <- annoGeneAll[annoGeneAll$gene_type == 'protein_coding' & annoGeneAll$gene_name %in% rownames(salmonCountsAll), ]
+salmonCountsAll2 <- salmonCountsAll[rownames(salmonCountsAll) %in% prot_cod_genes$gene_name, ]  
+rawLogCountsAll <- log2(salmonCountsAll2 + 1)
+pca_raw <- prcomp(t(rawLogCountsAll))
+annoSamples <- data.frame(sampleID=colnames(rawLogCountsAll))
+annoSamples$percentNonZeroGenes <- colSums(rawLogCountsAll!=0)/nrow(rawLogCountsAll) *100
+pct_gex <- data.frame('val' = annoSamples[[2]])
+rownames(pct_gex) <- annoSamples[[1]]
+pct_gex_outliers <- boxplot(pct_gex$val, plot = FALSE)$out
+pct_gex_out <- subset(pct_gex, pct_gex$val %in% pct_gex_outliers)
+pct_gex_omin <- max(min(pct_gex$val), as.numeric(quantile(pct_gex$val, 0.25)) - (IQR(pct_gex$val)*1.5))
+pct_gex_omax <- min(max(pct_gex$val), as.numeric(quantile(pct_gex$val, 0.75)) + (IQR(pct_gex$val)*1.5))
+annoSamples$gene_exp <- NA
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes<pct_gex_omin] <- "low"
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes>=pct_gex_omin] <- "intermediate"
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes>pct_gex_omax] <- "high"
+col.gene_exp <- c(low="blue", intermediate="#EEEEEE", high="red")
+corSamples <- cor(normCounts)
+pct_gex <- pct_gex %>% mutate(status_gex = ifelse(val >= pct_gex_omax, "outmax", ifelse(val <= pct_gex_omin, "outmin", "pass")))
+rownames(samples_id) <- samples_id$smp_id
+pct_gexids <- merge(samples_id, pct_gex, by=0)
+pct_gex <- data.frame(val=pct_gexids$val, status_gex=pct_gexids$status_gex)
+rownames(pct_gex) <- pct_gexids[[2]]
+
+qc_par <- merge(pct_nub, pct_igb, by=0)
+rownames(qc_par) <- qc_par[[1]]
+qc_par[[1]] <- NULL
+qc_par$val.y <- NULL
+qc_par$val.x <- NULL
+
+qc_par <- merge(qc_par, pct_umr, by=0)
+rownames(qc_par) <- qc_par[[1]]
+qc_par[[1]] <- NULL
+qc_par$val <- NULL
+
+qc_par <- merge(qc_par, pct_fld, by=0)
+rownames(qc_par) <- qc_par[[1]]
+qc_par[[1]] <- NULL
+qc_par$val <- NULL
+
+qc_par <- merge(qc_par, pct_gex, by=0)
+rownames(qc_par) <- qc_par[[1]]
+gex <- data.frame(GENE_EXPRESSION=qc_par$val)
+rownames(gex) <-rownames(qc_par)
+qc_par[[1]] <- NULL
+qc_par$val <- NULL
+
+bam_mets_gex <- merge(bam_met, gex,  by=0)
+rownames(bam_mets_gex) <- bam_mets_gex[[1]]
+bam_mets_gex[[1]] <- NULL
+bam_mets_gex <- scale(bam_mets_gex)
+bam_mets_gex <- bam_mets_gex[,colSums(is.na(bam_mets_gex))<nrow(bam_mets_gex)]
+
+qc_par <- merge(bam_mets_gex, qc_par,  by=0)
+rownames(qc_par) <- qc_par[[1]]
+qc_par[[1]] <- NULL
+
+qc_par[qc_par == "outmin" | qc_par == "outmax"] <- "out"
+
+qc_par_sort1 <- qc_par[order(-qc_par$PCT_USABLE_BASES), ]
+qc_par_sort2 <- qc_par[order(-qc_par$INTERGENIC_BASES), ]
+qc_par_sort3 <- qc_par[order(-qc_par$UNIQUELY_MAPPED_READS_PCT_STAR), ]
+qc_par_sort4 <- qc_par[order(-qc_par$FAILED), ]
+qc_par_sort5 <- qc_par[order(-qc_par$GENE_EXPRESSION), ]
+
+```
+
+# Outliers detection based on metric "PCT_USABLE_BASES"
+
+```{r pct_nub, fig.width=11, fig.height=8}
+
+hist(x = pct_nub$val, xlab='Proportion of Usable Bases', main = "", breaks = 150)
+abline(v = median(pct_nub$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_nub_omin, col = "red")
+text(x=0.66, y=60, paste0('N = ', length(pct_nub_outliers[pct_nub_outliers<pct_nub_omin])), col='blue', cex=.95)
+
+abline(v = pct_nub_omax, col = "red")
+text(x=0.85, y=60, paste0('N = ', length(pct_nub_outliers[pct_nub_outliers>pct_nub_omax])), col='blue', cex=.95)
+
+ha1 = HeatmapAnnotation(
+    usable_bases = qc_par_sort1$status_ubs,
+    intergenic_bases = qc_par_sort1$status_igb,
+    unique_reads = qc_par_sort1$status_umr,
+    failed = qc_par_sort1$status_fld,
+    gene_expression = qc_par_sort1$status_gex,
+    annotation_name_rot = 45,
+    show_legend = F,
+        col = list(
+              usable_bases =  c("pass" = "orange", "out" = "grey30"),
+              intergenic_bases =  c("pass" = "orange", "out" = "grey30"),
+              unique_reads =  c("pass" = "orange", "out" = "grey30"),
+              failed =  c("pass" = "orange", "out" = "grey30"),
+              gene_expression =  c("pass" = "orange", "out" = "grey30")
+    )
+)
+
+qc_par_sort1 <- qc_par_sort1[, -((ncol(qc_par_sort1)-4):ncol(qc_par_sort1))]
+
+p1 <- Heatmap(t(qc_par_sort1), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        top_annotation = ha1,
+        cluster_columns = FALSE,
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p1)
+
+```
+
+# Outliers detection based on metric "INTERGENIC_BASES"
+
+```{r pct_igb, fig.width=11, fig.height=8}
+hist(x = pct_igb$val, xlab='Number of Intergenic Bases', main = "", breaks = 150)
+abline(v = median(pct_igb$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_igb_omin, col = "red")
+text(x=5e+7, y=40, paste0('N = ', length(pct_igb_outliers[pct_igb_outliers<pct_igb_omin])), col='blue',  cex=.95)
+
+abline(v = pct_igb_omax, col = "red")
+text(x=6e+8, y=40, paste0('N = ', length(pct_igb_outliers[pct_igb_outliers>pct_igb_omax])), col='blue',  cex=.95)
+
+ha2 = HeatmapAnnotation(
+    usable_bases = qc_par_sort2$status_ubs,
+    intergenic_bases = qc_par_sort2$status_igb,
+    unique_reads = qc_par_sort2$status_umr,
+    failed = qc_par_sort2$status_fld,
+    gene_expression = qc_par_sort2$status_gex,
+    annotation_name_rot = 45,
+    show_legend = F,
+        col = list(
+              usable_bases =  c("pass" = "orange", "out" = "grey30"),
+              intergenic_bases =  c("pass" = "orange", "out" = "grey30"),
+              unique_reads =  c("pass" = "orange", "out" = "grey30"),
+              failed =  c("pass" = "orange", "out" = "grey30"),
+              gene_expression =  c("pass" = "orange", "out" = "grey30")
+    )
+)
+
+qc_par_sort2 <- qc_par_sort2[, -((ncol(qc_par_sort2)-4):ncol(qc_par_sort2))]
+
+p2 <- Heatmap(t(qc_par_sort2), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        top_annotation = ha2,
+        cluster_columns = FALSE,
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p2)
+
+```
+
+# Outliers detection based on metric "PCT_UNIQUELY_MAPPED_READS"
+
+```{r pct_umr, fig.width=11, fig.height=8}
+
+hist(x = pct_umr$val, xlab='Percentage of Uniquely Mapped Reads', main = "", breaks = 150)
+abline(v = median(pct_umr$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_umr_omin, col = "red")
+text(x=44, y=25, paste0('N = ', length(pct_umr_outliers[pct_umr_outliers<pct_umr_omin])), col='blue', cex=.95)
+
+abline(v = pct_umr_omax, col = "red")
+text(x=85, y=25, paste0('N = ', length(pct_umr_outliers[pct_umr_outliers>pct_umr_omax])), col='blue', cex=.95)
+
+ha3 = HeatmapAnnotation(
+    usable_bases = qc_par_sort3$status_ubs,
+    intergenic_bases = qc_par_sort3$status_igb,
+    unique_reads = qc_par_sort3$status_umr,
+    failed = qc_par_sort3$status_fld,
+    gene_expression = qc_par_sort3$status_gex,
+    annotation_name_rot = 45,
+    show_legend = F,
+        col = list(
+              usable_bases =  c("pass" = "orange", "out" = "grey30"),
+              intergenic_bases =  c("pass" = "orange", "out" = "grey30"),
+              unique_reads =  c("pass" = "orange", "out" = "grey30"),
+              failed =  c("pass" = "orange", "out" = "grey30"),
+              gene_expression =  c("pass" = "orange", "out" = "grey30")
+    )
+)
+
+qc_par_sort3 <- qc_par_sort3[, -((ncol(qc_par_sort3)-4):ncol(qc_par_sort3))]
+
+p3 <- Heatmap(t(qc_par_sort3), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        top_annotation = ha3,
+        cluster_columns = FALSE,
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p3)
+
+```
+
+
+# Outliers detection based on metric "FAILED"
+
+```{r pct_fld, fig.width=11, fig.height=8}
+
+hist(x = pct_fld$val, xlab='Percentage of Uniquely Mapped Reads', main = "", breaks = 150)
+abline(v = median(pct_fld$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_fld_omin, col = "red")
+text(x=0.007, y=100, paste0('N = ', length(pct_fld_outliers[pct_fld_outliers<pct_fld_omin])), col='blue', cex=.95)
+
+abline(v = pct_fld_omax, col = "red")
+text(x=0.032, y=100, paste0('N = ', length(pct_fld_outliers[pct_fld_outliers>pct_fld_omax])), col='blue', cex=.95)
+
+ha4 = HeatmapAnnotation(
+    usable_bases = qc_par_sort4$status_ubs,
+    intergenic_bases = qc_par_sort4$status_igb,
+    unique_reads = qc_par_sort4$status_umr,
+    failed = qc_par_sort4$status_fld,
+    gene_expression = qc_par_sort4$status_gex,
+    annotation_name_rot = 45,
+    show_legend = F,
+        col = list(
+              usable_bases =  c("pass" = "orange", "out" = "grey30"),
+              intergenic_bases =  c("pass" = "orange", "out" = "grey30"),
+              unique_reads =  c("pass" = "orange", "out" = "grey30"),
+              failed =  c("pass" = "orange", "out" = "grey30"),
+              gene_expression =  c("pass" = "orange", "out" = "grey30")
+    )
+)
+
+qc_par_sort4 <- qc_par_sort4[, -((ncol(qc_par_sort4)-4):ncol(qc_par_sort4))]
+
+p4 <- Heatmap(t(qc_par_sort4), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        top_annotation = ha4,
+        cluster_columns = FALSE,
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p4)
+
+```
+
+
+# Unusual proportion of gene expression : protein coding genes only
+
+```{r expr_prop2, fig.width=11, fig.height=8}
+
+hist(x = pct_gex$val, xlab='Percentage of Genes with Non-zero Expression', main = "", breaks = 150)
+abline(v = median(pct_gex$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_gex_omin, col = "red")
+text(x=63, y=25, paste0('N = ', length(pct_gex_outliers[pct_gex_outliers<pct_gex_omin])), col='blue', cex=.95)
+
+abline(v = pct_gex_omax, col = "red")
+text(x=98, y=25, paste0('N = ', length(pct_gex_outliers[pct_gex_outliers>pct_gex_omax])), col='blue', cex=.95)
+
+
+ha5 = HeatmapAnnotation(
+    usable_bases = qc_par_sort5$status_ubs,
+    intergenic_bases = qc_par_sort5$status_igb,
+    unique_reads = qc_par_sort5$status_umr,
+    failed = qc_par_sort5$status_fld,
+    gene_expression = qc_par_sort5$status_gex,
+    annotation_name_rot = 45,
+    show_legend = F,
+        col = list(
+              usable_bases =  c("pass" = "orange", "out" = "grey30"),
+              intergenic_bases =  c("pass" = "orange", "out" = "grey30"),
+              unique_reads =  c("pass" = "orange", "out" = "grey30"),
+              failed =  c("pass" = "orange", "out" = "grey30"),
+              gene_expression =  c("pass" = "orange", "out" = "grey30")
+    )
+)
+
+qc_par_sort5 <- qc_par_sort5[, -((ncol(qc_par_sort5)-4):ncol(qc_par_sort5))]
+
+p5 <- Heatmap(t(qc_par_sort5), 
+        name="scaled_value",
+        col = circlize::colorRamp2(breaks = c(4, 0, -4), colors = c("red", "#EEEEEE", "blue")),
+        top_annotation = ha5,
+        cluster_columns = FALSE,
+        show_column_names = F,
+        show_row_names = T,
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2")
+
+print(p5)
+
+
+p1 <- Heatmap(corSamples, show_row_names = FALSE, show_column_names = FALSE, name = "correlation", 
+        top_annotation = columnAnnotation(df = annoSamples["gene_exp"], name="gene_exp", col=list(`gene_exp`=col.gene_exp) ))
+
+print(p1)
+
+jout_gex <-corSamples[pct_gex_out[[1]], pct_gex_out[[1]]]
+
+p2 <- Heatmap(jout_gex,
+              show_row_names = FALSE,
+              show_column_names = FALSE,
+              name = "correlation",
+              )
+
+print(p2)
+
+gexpass <- corSamples[!rownames(corSamples) %in% rownames(pct_gex_out), ]
+
+gex_pass <-corSamples[rownames(gexpass), rownames(gexpass)]
+  
+p3 <- Heatmap(gex_pass,
+              show_row_names = FALSE,
+              show_column_names = FALSE,
+              name = "correlation",
+              )
+
+print(p3)
+
+```
+
+
+# UpSet plots
+
+```{r upset, fig.width=11, fig.height=8}
+
+qc_par_upset <- qc_par[, (ncol(qc_par)-4):ncol(qc_par)]
+qc_par_upset[qc_par_upset == "out"] <- "1"
+qc_par_upset[qc_par_upset == "pass"] <- "0"
+qc_par_upset <- qc_par_upset %>% mutate(across(everything(), as.numeric))
+qc_par_upset_out = qc_par_upset[rowSums(qc_par_upset[])>0,]
+
+p1 <- upset(qc_par_upset, sets = c("status_ubs", "status_igb", "status_umr", "status_fld", "status_gex"), sets.bar.color = "#56B4E9",
+order.by = "freq", empty.intersections = "on")
+
+print(p1)
+
+m = make_comb_mat(qc_par_upset)
+m2 = make_comb_mat(qc_par_upset_out)
+
+p3 <- UpSet(m2, comb_col = "#0000FF", bg_col = "#F0F0FF", bg_pt_col = "#CCCCFF")
+print(p3)
+
+ha <- HeatmapAnnotation("Intersection\nsize" = anno_barplot(comb_size(m2), border = FALSE, gp = gpar(fill = "black"), height = unit(3, "cm")), annotation_name_side = "left", annotation_name_rot = 0)
+
+p4 <- UpSet(m2, top_annotation = upset_top_annotation(m2, gp = gpar(col = comb_degree(m2))))
+print(p4)
+
+p2 <- UpSet(m, comb_col = "#0000FF", bg_col = "#F0F0FF", bg_pt_col = "#CCCCFF")
+print(p2)
+
+```
+
+
+# Unusual proportion of gene expression: all genes
+
+```{r expr_prop, fig.width=11, fig.height=8}
+
+load("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/tximport.Rdata")
+samples <- read.table("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/sample_ids.tsv" ,header=TRUE, sep="\t")
+samples_id <- read.table("/datastage/silver/lysarc_bioinfo/RNAseq/data_input/sample_ids_corresp.tsv" ,header=TRUE, sep="\t")
+
+ddsTxi <- DESeqDataSetFromTximport(salmon_txi, colData = samples, design = ~1)
+dds <- estimateSizeFactors(ddsTxi)
+deseq_obj <- dds
+normCounts <- log2(counts(deseq_obj, normalized=TRUE)+1)
+KEEP.genes <- rowSums(edgeR::cpm(counts(deseq_obj)) >= 0.2) >= 10
+normCountsAll <- normCounts
+normCounts <- normCounts[KEEP.genes, samples$sample_id]
+salmonCountsAll <- counts(dds, normalize=FALSE)
+
+rawLogCountsAll <- log2(salmonCountsAll + 1)
+pca_raw <- prcomp(t(rawLogCountsAll))
+
+annoSamples <- data.frame(sampleID=colnames(rawLogCountsAll))
+annoSamples$percentNonZeroGenes <- colSums(rawLogCountsAll!=0)/nrow(rawLogCountsAll) *100
+
+pct_gex <- data.frame('val' = annoSamples[[2]])
+rownames(pct_gex) <- annoSamples[[1]]
+
+pct_gex_outliers <- boxplot(pct_gex$val, plot = FALSE)$out
+pct_gex_out <- subset(pct_gex, pct_gex$val %in% pct_gex_outliers)
+pct_gex_omin <- max(min(pct_gex$val), as.numeric(quantile(pct_gex$val, 0.25)) - (IQR(pct_gex$val)*1.5))
+pct_gex_omax <- min(max(pct_gex$val), as.numeric(quantile(pct_gex$val, 0.75)) + (IQR(pct_gex$val)*1.5))
+
+hist(x = pct_gex$val, xlab='Percentage of Genes with Non-zero Expression', main = "", breaks = 150)
+abline(v = median(pct_gex$val, na.rm = TRUE), col = "blue")
+
+abline(v = pct_gex_omin, col = "red")
+text(x=25, y=25, paste0('N = ', length(pct_gex_outliers[pct_gex_outliers<pct_gex_omin])), col='blue', cex=.95)
+
+abline(v = pct_gex_omax, col = "red")
+text(x=45, y=25, paste0('N = ', length(pct_gex_outliers[pct_gex_outliers>pct_gex_omax])), col='blue', cex=.95)
+
+pct_gex <- pct_gex %>% mutate(status_gex = ifelse(val >= pct_gex_omax, "outmax", ifelse(val <= pct_gex_omin, "outmin", "pass")))
+
+rownames(samples_id) <- samples_id$smp_id
+pct_gexids <- merge(samples_id, pct_gex, by=0)
+pct_gex <- data.frame(val=pct_gexids$val, status_gex=pct_gexids$status_gex)
+rownames(pct_gex) <- pct_gexids[[2]]
+
+
+annoSamples$gene_exp <- NA
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes<pct_gex_omin] <- "low"
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes>=pct_gex_omin] <- "intermediate"
+annoSamples$gene_exp[annoSamples$percentNonZeroGenes>pct_gex_omax] <- "high"
+col.gene_exp <- c(low="blue", intermediate="#EEEEEE", high="red")
+corSamples <- cor(normCounts)
+corToMeanSample <- cor(normCounts, rowMeans(normCounts))
+
+p1 <- Heatmap(corSamples, show_row_names = FALSE, show_column_names = FALSE, name = "correlation", 
+        top_annotation = columnAnnotation(df = annoSamples["gene_exp"], name="gene_exp", col=list(`gene_exp`=col.gene_exp) ))
+
+print(p1)
+
+```
